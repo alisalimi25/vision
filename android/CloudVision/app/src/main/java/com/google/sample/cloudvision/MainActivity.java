@@ -58,9 +58,12 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 public class MainActivity extends AppCompatActivity {
-    private static final String CLOUD_VISION_API_KEY = "YOUR_API_KEY";
+    private static final String CLOUD_VISION_API_KEY = "AIzaSyA8t8abG15hDFnBaogvPBxH1G2RdIfadeI";
     public static final String FILE_NAME = "temp.jpg";
     private static final String ANDROID_CERT_HEADER = "X-Android-Cert";
     private static final String ANDROID_PACKAGE_HEADER = "X-Android-Package";
@@ -189,98 +192,128 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    private static class SubmitTask extends AsyncTask<Object, Void, String> {
+        private final AppCompatActivity parentView;
+        private final Bitmap bitmap;
+        private final TextView mImageDetails;
+
+        private SubmitTask(AppCompatActivity parentView, Bitmap bitmap, TextView mImageDetails) {
+            this.parentView = parentView;
+            this.bitmap = bitmap;
+            this.mImageDetails = mImageDetails;
+        }
+
+        private String convertResponseToString(BatchAnnotateImagesResponse response) {
+            StringBuilder message = new StringBuilder("I found these things:\n\n");
+
+            List<EntityAnnotation> entityAnnotationList = response.getResponses().get(0).getTextAnnotations();
+            if (entityAnnotationList == null) {
+                message.append("Error");
+            } else {
+                for (EntityAnnotation entityAnnotation : entityAnnotationList) {
+                    message.append(entityAnnotation.getDescription()).append("\n");
+                }
+            }
+
+            return message.toString();
+        }
+
+        @Override
+        protected String doInBackground(Object... params) {
+            try {
+                HttpTransport httpTransport = AndroidHttp.newCompatibleTransport();
+                JsonFactory jsonFactory = GsonFactory.getDefaultInstance();
+
+                VisionRequestInitializer requestInitializer =
+                        new VisionRequestInitializer(CLOUD_VISION_API_KEY) {
+                            /**
+                             * We override this so we can inject important identifying fields into the HTTP
+                             * headers. This enables use of a restricted cloud platform API key.
+                             */
+                            @Override
+                            protected void initializeVisionRequest(VisionRequest<?> visionRequest)
+                                    throws IOException {
+                                super.initializeVisionRequest(visionRequest);
+
+                                String packageName = parentView.getPackageName();
+                                visionRequest.getRequestHeaders().set(ANDROID_PACKAGE_HEADER, packageName);
+
+                                String sig = PackageManagerUtils.getSignature(parentView.getPackageManager(), packageName);
+
+                                visionRequest.getRequestHeaders().set(ANDROID_CERT_HEADER, sig);
+                            }
+                        };
+
+                Vision.Builder builder = new Vision.Builder(httpTransport, jsonFactory, null);
+                builder.setVisionRequestInitializer(requestInitializer);
+
+                Vision vision = builder.build();
+
+                BatchAnnotateImagesRequest batchAnnotateImagesRequest =
+                        new BatchAnnotateImagesRequest();
+                batchAnnotateImagesRequest.setRequests(new ArrayList<AnnotateImageRequest>() {{
+                    AnnotateImageRequest annotateImageRequest = new AnnotateImageRequest();
+
+                    // Add the image
+                    Image base64EncodedImage = new Image();
+                    // Convert the bitmap to a JPEG
+                    // Just in case it's a format that Android understands but Cloud Vision
+                    ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
+                    bitmap.compress(Bitmap.CompressFormat.JPEG, 90, byteArrayOutputStream);
+                    byte[] imageBytes = byteArrayOutputStream.toByteArray();
+
+                    // Base64 encode the JPEG
+                    base64EncodedImage.encodeContent(imageBytes);
+                    annotateImageRequest.setImage(base64EncodedImage);
+
+                    // add the features we want
+                    annotateImageRequest.setFeatures(new ArrayList<Feature>() {{
+                        Feature labelDetection = new Feature();
+                        labelDetection.setType("TEXT_DETECTION");
+                        labelDetection.setMaxResults(10);
+                        add(labelDetection);
+                    }});
+
+                    // Add the list of one thing to the request
+                    add(annotateImageRequest);
+                }});
+
+                Vision.Images.Annotate annotateRequest =
+                        vision.images().annotate(batchAnnotateImagesRequest);
+                // Due to a bug: requests to Vision API containing large images fail when GZipped.
+                annotateRequest.setDisableGZipContent(true);
+                Log.d(TAG, "created Cloud Vision request object, sending request");
+
+                BatchAnnotateImagesResponse response = annotateRequest.execute();
+                return convertResponseToString(response);
+
+            } catch (GoogleJsonResponseException e) {
+                Log.d(TAG, "failed to make API request because " + e.getContent());
+            } catch (IOException e) {
+                Log.d(TAG, "failed to make API request because of other IOException " +
+                        e.getMessage());
+            }
+            return "Cloud Vision API request failed. Check logs for details.";
+        }
+
+        protected void onPostExecute(String result) {
+            mImageDetails.setText(result);
+        }
+    }
+
     private void callCloudVision(final Bitmap bitmap) throws IOException {
         // Switch text to loading
         mImageDetails.setText(R.string.loading_message);
 
-        // Do the real work in an async task, because we need to use the network anyway
-        new AsyncTask<Object, Void, String>() {
-            @Override
-            protected String doInBackground(Object... params) {
-                try {
-                    HttpTransport httpTransport = AndroidHttp.newCompatibleTransport();
-                    JsonFactory jsonFactory = GsonFactory.getDefaultInstance();
-
-                    VisionRequestInitializer requestInitializer =
-                            new VisionRequestInitializer(CLOUD_VISION_API_KEY) {
-                                /**
-                                 * We override this so we can inject important identifying fields into the HTTP
-                                 * headers. This enables use of a restricted cloud platform API key.
-                                 */
-                                @Override
-                                protected void initializeVisionRequest(VisionRequest<?> visionRequest)
-                                        throws IOException {
-                                    super.initializeVisionRequest(visionRequest);
-
-                                    String packageName = getPackageName();
-                                    visionRequest.getRequestHeaders().set(ANDROID_PACKAGE_HEADER, packageName);
-
-                                    String sig = PackageManagerUtils.getSignature(getPackageManager(), packageName);
-
-                                    visionRequest.getRequestHeaders().set(ANDROID_CERT_HEADER, sig);
-                                }
-                            };
-
-                    Vision.Builder builder = new Vision.Builder(httpTransport, jsonFactory, null);
-                    builder.setVisionRequestInitializer(requestInitializer);
-
-                    Vision vision = builder.build();
-
-                    BatchAnnotateImagesRequest batchAnnotateImagesRequest =
-                            new BatchAnnotateImagesRequest();
-                    batchAnnotateImagesRequest.setRequests(new ArrayList<AnnotateImageRequest>() {{
-                        AnnotateImageRequest annotateImageRequest = new AnnotateImageRequest();
-
-                        // Add the image
-                        Image base64EncodedImage = new Image();
-                        // Convert the bitmap to a JPEG
-                        // Just in case it's a format that Android understands but Cloud Vision
-                        ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
-                        bitmap.compress(Bitmap.CompressFormat.JPEG, 90, byteArrayOutputStream);
-                        byte[] imageBytes = byteArrayOutputStream.toByteArray();
-
-                        // Base64 encode the JPEG
-                        base64EncodedImage.encodeContent(imageBytes);
-                        annotateImageRequest.setImage(base64EncodedImage);
-
-                        // add the features we want
-                        annotateImageRequest.setFeatures(new ArrayList<Feature>() {{
-                            Feature labelDetection = new Feature();
-                            labelDetection.setType("LABEL_DETECTION");
-                            labelDetection.setMaxResults(10);
-                            add(labelDetection);
-                        }});
-
-                        // Add the list of one thing to the request
-                        add(annotateImageRequest);
-                    }});
-
-                    Vision.Images.Annotate annotateRequest =
-                            vision.images().annotate(batchAnnotateImagesRequest);
-                    // Due to a bug: requests to Vision API containing large images fail when GZipped.
-                    annotateRequest.setDisableGZipContent(true);
-                    Log.d(TAG, "created Cloud Vision request object, sending request");
-
-                    BatchAnnotateImagesResponse response = annotateRequest.execute();
-                    return convertResponseToString(response);
-
-                } catch (GoogleJsonResponseException e) {
-                    Log.d(TAG, "failed to make API request because " + e.getContent());
-                } catch (IOException e) {
-                    Log.d(TAG, "failed to make API request because of other IOException " +
-                            e.getMessage());
-                }
-                return "Cloud Vision API request failed. Check logs for details.";
-            }
-
-            protected void onPostExecute(String result) {
-                mImageDetails.setText(result);
-            }
-        }.execute();
+        AsyncTask<Object, Void, String> task = new SubmitTask(this, bitmap, mImageDetails).execute();
+        try {
+            task.get(5, TimeUnit.SECONDS);
+        } catch (TimeoutException | ExecutionException | InterruptedException e) {
+            mImageDetails.setText("Error");
+        }
     }
 
     public Bitmap scaleBitmapDown(Bitmap bitmap, int maxDimension) {
-
         int originalWidth = bitmap.getWidth();
         int originalHeight = bitmap.getHeight();
         int resizedWidth = maxDimension;
@@ -297,21 +330,5 @@ public class MainActivity extends AppCompatActivity {
             resizedWidth = maxDimension;
         }
         return Bitmap.createScaledBitmap(bitmap, resizedWidth, resizedHeight, false);
-    }
-
-    private String convertResponseToString(BatchAnnotateImagesResponse response) {
-        String message = "I found these things:\n\n";
-
-        List<EntityAnnotation> labels = response.getResponses().get(0).getLabelAnnotations();
-        if (labels != null) {
-            for (EntityAnnotation label : labels) {
-                message += String.format(Locale.US, "%.3f: %s", label.getScore(), label.getDescription());
-                message += "\n";
-            }
-        } else {
-            message += "nothing";
-        }
-
-        return message;
     }
 }
